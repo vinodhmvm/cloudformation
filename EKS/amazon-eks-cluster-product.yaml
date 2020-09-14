@@ -1,0 +1,151 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: EKS Cluster
+
+Parameters:
+
+  Subnet1:
+    Description: ID of subnet1
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/Sub1Id
+
+  Subnet2:
+    Description: ID of subnet1
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/Sub2Id
+
+  Subnet3:
+    Description: ID of subnet1
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/Sub3Id 
+
+  AppName:
+    Description: 'Dynamic resource name for uniqueness'
+    Type: String
+    Default: 'cfncontainereks'
+
+  KubernetesVersion:
+    Description: The Kubernetes version to install
+    Type: String
+    Default: 1.17
+    AllowedValues:
+      - 1.16
+      - 1.17
+
+  NodeImageIdSSMParam:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: /app/dev/cfncontainereks/compute/ec2/amiid
+    Description: AWS Systems Manager Parameter Store parameter of the AMI ID for the worker node instances.
+
+  EKSClusterRole:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: The IAM Role to allow Amazon EKS and the Kubernetes control plane to manage AWS resources on your behalf.
+    Default: /app/dev/cfncontainereks/iam/role/EKSClusterRoleArn
+
+  EKSNodeSecurityGroup:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: The Node security group to allow Amazon EKS and the Kubernetes control plane to manage AWS resources on your behalf.
+    Default: /app/dev/cfncontainereks/compute/security/EKSNodeSecurityGroup 
+
+  EKSClusterControlPlaneSecurityGroup:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: The Control Plane security group to allow Amazon EKS and the Kubernetes control plane to manage AWS resources on your behalf.
+    Default: /app/dev/cfncontainereks/compute/security/EKSControlPlaneSecurityGroup
+
+  EKSNodeInstanceProfile:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: The Node Instance Profile to allow Amazon EKS and the Kubernetes control plane to manage AWS resources on your behalf.
+    Default: /app/dev/cfncontainereks/iam/role/EKSNodeInstanceProfile   
+
+  EKSCMKKeyArn:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: The CMK key for EKS.
+    Default: /app/dev/cfncontainereks/container/key/CMKEKSClusterKeyArn
+
+  NodeInstanceType:
+    Description: EC2 instance type for the node instances
+    Type: String
+    Default: t3.medium
+    ConstraintDescription: Must be a valid EC2 instance type
+
+  NodeAutoScalingGroupDesiredCapacity:
+    Description: Desired capacity of Node Group ASG.
+    Type: Number
+    Default: 3
+
+  NodeVolumeSize:
+    Description: Node volume size
+    Type: Number
+    Default: 20
+
+Resources:
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub ${AppName}-eks-cluster
+      Version: !Sub ${KubernetesVersion}
+      RoleArn: !Sub ${EKSClusterRole}
+      EncryptionConfig: 
+        - Resources: [ secrets ]
+          Provider:
+            KeyArn: !Ref EKSCMKKeyArn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref EKSClusterControlPlaneSecurityGroup
+        SubnetIds:
+          - !Ref Subnet1
+          - !Ref Subnet2
+          - !Ref Subnet3
+
+  EKSNodeGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: EKSCluster
+    Properties:
+      DesiredCapacity: !Ref NodeAutoScalingGroupDesiredCapacity
+      LaunchConfigurationName: !Ref EKSNodeLaunchConfig
+      MinSize: !Ref NodeAutoScalingGroupDesiredCapacity
+      MaxSize: !Ref NodeAutoScalingGroupDesiredCapacity
+      VPCZoneIdentifier: 
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppName}-node
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: !Ref NodeAutoScalingGroupDesiredCapacity
+        PauseTime: PT5M
+
+  EKSNodeLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      IamInstanceProfile: !Ref EKSNodeInstanceProfile
+      ImageId: !Ref NodeImageIdSSMParam
+      InstanceType: !Ref NodeInstanceType
+      SecurityGroups:
+        - !Ref EKSNodeSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref NodeVolumeSize
+            VolumeType: gp2
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64:
+          |
+            #!/bin/bash
+            yum update -y
+
+Outputs:
+
+  ClusterCertificate:
+    Description: The cluster certificate
+    Value: !GetAtt EKSCluster.CertificateAuthorityData
+
+  ClusterEndpoint:
+    Description: The cluster endpoint
+    Value: !GetAtt EKSCluster.Endpoint

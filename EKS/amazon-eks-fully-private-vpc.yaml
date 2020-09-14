@@ -1,0 +1,221 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Amazon EKS Sample VPC - Private only subnets. These subnets do not have access to the Internet and this templates creates the recommended VPC Endpoints for running EKS Clusters.'
+
+Parameters:
+
+  VpcBlock:
+    Type: String
+    Default: 28.11.108.0/24
+    Description: The CIDR range for the VPC. This should be a valid private (RFC 1918) CIDR range.
+
+  PrivateSubnet01Block:
+    Type: String
+    Default: 28.11.108.0/26
+    Description: CidrBlock for private subnet 01 within the VPC
+
+  PrivateSubnet02Block:
+    Type: String
+    Default: 28.11.108.64/26
+    Description: CidrBlock for private subnet 02 within the VPC
+
+  PrivateSubnet03Block:
+    Type: String
+    Default: 28.11.108.128/26
+    Description: CidrBlock for private subnet 03 within the VPC
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Primary Worker Network Configuration"
+        Parameters:
+          - VpcBlock
+          - PrivateSubnet01Block
+          - PrivateSubnet02Block
+          - PrivateSubnet03Block
+  
+Conditions:
+  Has2Azs:
+    Fn::Or:
+      - Fn::Equals:
+        - {Ref: 'AWS::Region'}
+        - ap-south-1
+      - Fn::Equals:
+        - {Ref: 'AWS::Region'}
+        - ap-northeast-2
+      - Fn::Equals:
+        - {Ref: 'AWS::Region'}
+        - ca-central-1
+      - Fn::Equals:
+        - {Ref: 'AWS::Region'}
+        - cn-north-1
+      - Fn::Equals:
+        - {Ref: 'AWS::Region'}
+        - sa-east-1
+      - Fn::Equals:
+        - {Ref: 'AWS::Region'}
+        - us-west-1
+
+  HasMoreThan2Azs:
+    Fn::Not:
+      - Condition: Has2Azs
+
+Mappings:
+  ServiceNamePrefixMap:
+    aws:
+      Name: com.amazonaws
+    aws-cn:
+      Name: cn.com.amazonaws
+    aws-us-gov:
+      Name: com.amazonaws
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:  !Ref VpcBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName}-VPC'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 01
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '0'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet01Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PrivateSubnet01"
+      - Key: kubernetes.io/role/internal-elb
+        Value: 1
+
+  PrivateSubnet02:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 02
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '1'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet02Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PrivateSubnet02"
+      - Key: kubernetes.io/role/internal-elb
+        Value: 1
+
+  PrivateSubnet03:
+    Condition: HasMoreThan2Azs
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 03
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '2'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet03Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PrivateSubnet03"
+      - Key: kubernetes.io/role/internal-elb
+        Value: 1
+
+  PrivateSubnet01RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet01
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet02RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet02
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet03RouteTableAssociation:
+    Condition: HasMoreThan2Azs
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet03
+      RouteTableId: !Ref PrivateRouteTable
+
+  VPCSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/network/VPCId
+      Type: String
+      Value: !Ref VPC
+
+  PrivateSubnet1SSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/network/Sub1Id
+      Type: String
+      Value: !Ref PrivateSubnet01
+
+  PrivateSubnet2SSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/network/Sub2Id
+      Type: String
+      Value: !Ref PrivateSubnet02
+
+  PrivateSubnet3SSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/network/Sub3Id
+      Type: String
+      Value: !Ref PrivateSubnet03
+      
+Outputs:
+
+  VpcId:
+    Description: The VPC ID
+    Value: !Ref VPC
+
+  PrivateSubnet1:
+    Description: PrivateSubnet01 in the VPC
+    Value: !Ref PrivateSubnet01
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet1"   
+
+  PrivateSubnet2:
+    Description: PrivateSubnet02 in the VPC
+    Value: !Ref PrivateSubnet02
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet2"   
+
+  PrivateSubnet3:
+    Description: PrivateSubnet03 in the VPC
+    Value: !Ref PrivateSubnet03    
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet3"   

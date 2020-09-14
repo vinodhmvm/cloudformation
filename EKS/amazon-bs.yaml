@@ -1,0 +1,339 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Boostrap Cluster
+
+Parameters:
+
+  VPCId:
+    Description: VPC
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/VPCId
+
+  Subnet1:
+    Description: ID of subnet1
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/Sub1Id
+
+  Subnet2:
+    Description: ID of subnet1
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/Sub2Id
+
+  Subnet3:
+    Description: ID of subnet1
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /app/network/Sub3Id 
+
+  AppName:
+    Description: 'Dynamic resource name for uniqueness'
+    Type: String
+    Default: 'cfncontainereks'
+
+  #Note Only Redhat7.8 version of AMI is supported.
+  WorkerNodeAMIId:
+    Description: AMI ID for Worker Nodes
+    Type: String
+    Default: ami-098f16afa9edf40be
+
+Resources:
+#Custom Management Key for EKS Cluster
+  CMKEKSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "This KMS will be used to encrypt EKS Cluster"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: cmk-eks-cluster-id
+        Statement:
+          - Sid: 'Enable IAM User Permissions'
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "Allow administration of the key"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/admin
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          - Sid: "Allow use of the key"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/admin
+            Action:
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+              - "kms:GenerateDataKeyWihtoutPlaintext"
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsforAWSResource: 'true'
+
+  #The below Resource will give the key created above friendly name to allow ease of management in the AWS Console
+  CMKEKSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/cmk-eks-cluster
+      TargetKeyId:
+        Ref: CMKEKSKey
+
+  CMKEKSArnParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/container/key/CMKEKSClusterKeyArn
+      Description: This is a SSM parameter that is consumed by a Cloud Formation template that build the EKS Cluster Template
+      Type: String
+      Value: !GetAtt CMKEKSKey.Arn
+
+#EndPoints Required for EKSCluster and EKS Worker Node Creation
+  EC2Endpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      PolicyDocument: '{
+        "Version":"2012-10-17",
+        "Statement": [{
+          "Effect":"Allow",
+          "Principal":"*",
+          "Action":"*",
+          "Resource":"*"
+          }]
+        }' 
+      PrivateDnsEnabled: true    
+      SecurityGroupIds:
+      - !Ref EndpointSecurityGroup
+      VpcEndpointType: Interface
+      VpcId: !Ref VPCId 
+      SubnetIds: [!Ref Subnet1, !Ref Subnet2, !Ref Subnet3]
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
+      
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPCId
+      GroupDescription: Enable HTTPS access on the configured port
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppName}-vpcendpoint-sg
+
+  EndpointSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+
+  EndpointSecurityGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+          
+#Cluster Roles and Node Roles required for the EKS Environment
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - eks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EKSClusterRoleSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/iam/role/EKSClusterRoleArn
+      Description: This is a SSM Parameter that is consumed by a cloud formation product template
+      Type: String
+      Value: !GetAtt EKSClusterRole.Arn     
+
+  EKSNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref EKSNodeInstanceRole
+
+  EKSNodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  EKSNodeRoleSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/iam/role/EKSNodeRoleArn
+      Description: This is a SSM Parameter that is consumed by a cloud formation product template
+      Type: String
+      Value: !GetAtt EKSNodeInstanceRole.Arn
+
+  EKSNodeInstanceProfileSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/iam/role/EKSNodeInstanceProfile
+      Description: This is a SSM Parameter that is consumed by a cloud formation product template
+      Type: String
+      Value: !Ref EKSNodeInstanceProfile                         
+
+  EKSEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group to govern who can access the endpoints
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 28.11.108.0/24
+
+  EKSEndPointSGSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/iam/role/EKSEndPointSG
+      Description: This is a SSM Parameter that is consumed by a cloud formation product template
+      Type: String
+      Value: !Ref EKSEndpointSecurityGroup             
+
+  ControlPlaneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Cluster communication with worker nodes
+      VpcId: !Ref VPCId
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for all nodes in the cluster
+      VpcId: !Ref VPCId
+
+  NodeSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow nodes to communicate with each other
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: '-1'
+      FromPort: 0
+      ToPort: 65535
+
+  NodeSecurityGroupFromControlPlaneIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow worker Kubelets and pods to receive communication from the cluster control plane
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1025
+      ToPort: 65535
+
+  ControlPlaneEgressToNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow the cluster control plane to communicate with worker Kubelet and pods
+      GroupId: !Ref ControlPlaneSecurityGroup
+      DestinationSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1025
+      ToPort: 65535
+
+  NodeSecurityGroupFromControlPlaneOn443Ingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow pods running extension API servers on port 443 to receive communication from cluster control plane
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  ControlPlaneEgressToNodeSecurityGroupOn443:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow the cluster control plane to communicate with pods running extension API servers on port 443
+      GroupId: !Ref ControlPlaneSecurityGroup
+      DestinationSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  ControlPlaneSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow pods to communicate with the cluster API Server
+      GroupId: !Ref ControlPlaneSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+      FromPort: 443
+
+  ControlPlaneSGSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/compute/security/EKSControlPlaneSecurityGroup
+      Description: This is a SSM Parameter that is consumed by a cloud formation product template
+      Type: String
+      Value: !Ref ControlPlaneSecurityGroup  
+
+  NodeSGSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/compute/security/EKSNodeSecurityGroup
+      Description: This is a SSM Parameter that is consumed by a cloud formation product template
+      Type: String
+      Value: !Ref NodeSecurityGroup              
+  
+#Common SSM Paramter Created which has to be used by Product Template
+  WorkerNodeAMISSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/dev/cfncontainereks/compute/ec2/amiid
+      Description: This is a SSM Parameter group that is consumed by a CloudFormation Teamplate that builds EKS Cluster
+      Type: String
+      Value: !Ref WorkerNodeAMIId                     
+
+Outputs:
+
+  NodeInstanceRole:
+    Description: The node instance role
+    Value: !GetAtt EKSNodeInstanceRole.Arn
+
+  EKSClusterRole:
+    Description: Cluster Role
+    Value: !GetAtt EKSClusterRole.Arn
